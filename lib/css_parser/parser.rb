@@ -648,7 +648,6 @@ module CssParser
             uri.port = 443 unless uri.port
             http = Net::HTTP.new(uri.host, uri.port)
             http.use_ssl = true
-            http.verify_mode = OpenSSL::SSL::VERIFY_NONE
           else
             http = Net::HTTP.new(uri.host, uri.port)
           end
