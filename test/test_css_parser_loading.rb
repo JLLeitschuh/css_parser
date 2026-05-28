@@ -9,7 +9,13 @@ class CssParserLoadingTests < Minitest::Test
 
   def setup
     # from http://nullref.se/blog/2006/5/17/testing-with-webrick
-    @cp = Parser.new
+    # `allow_local_network: true` and `allow_file_uris: true` are both
+    # needed because the fixtures in this file are served from
+    # `http://localhost:12000` (gated by allow_local_network) AND
+    # referenced via `file://...` (gated by allow_file_uris). Both
+    # are off-by-default since GHSA-9pmc-p236-855h. The protections
+    # themselves are exercised in `test_css_parser_ssrf.rb`.
+    @cp = Parser.new(allow_local_network: true, allow_file_uris: true)
 
     @uri_base = 'http://localhost:12000'
 
@@ -108,7 +114,7 @@ class CssParserLoadingTests < Minitest::Test
   end
 
   def test_imports_disabled
-    cp = Parser.new(import: false)
+    cp = Parser.new(import: false, allow_local_network: true)
     cp.load_uri!("#{@uri_base}/import1.css")
 
     # from '/import1.css'
@@ -186,13 +192,13 @@ class CssParserLoadingTests < Minitest::Test
   end
 
   def test_suppressing_circular_reference_exceptions
-    cp_without_exceptions = Parser.new(io_exceptions: false)
+    cp_without_exceptions = Parser.new(io_exceptions: false, allow_local_network: true)
 
     cp_without_exceptions.load_uri!("#{@uri_base}/import-circular-reference.css")
   end
 
   def test_toggling_not_found_exceptions
-    cp_with_exceptions = Parser.new(io_exceptions: true)
+    cp_with_exceptions = Parser.new(io_exceptions: true, allow_local_network: true)
 
     err = assert_raises RemoteFileError do
       cp_with_exceptions.load_uri!("#{@uri_base}/no-exist.xyz")
@@ -200,7 +206,7 @@ class CssParserLoadingTests < Minitest::Test
 
     assert_includes err.message, "#{@uri_base}/no-exist.xyz"
 
-    cp_without_exceptions = Parser.new(io_exceptions: false)
+    cp_without_exceptions = Parser.new(io_exceptions: false, allow_local_network: true)
 
     cp_without_exceptions.load_uri!("#{@uri_base}/no-exist.xyz")
   end

@@ -19,4 +19,5 @@ Gem::Specification.new name, CssParser::VERSION do |s|
   s.metadata['rubygems_mfa_required'] = 'true'
 
   s.add_dependency 'addressable'
+  s.add_dependency 'ssrf_filter', '~> 1.5'
 end
