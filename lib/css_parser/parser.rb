@@ -638,6 +638,15 @@ module CssParser
     # from the remote read path — so an HTTP redirect cannot reach this
     # branch (GHSA-9pmc-p236-855h).
     def read_local_file(uri) # :nodoc:
+      # Internal invariant: this method is the implementation of the
+      # `allow_file_uris: true` branch of `load_uri!`. If it is ever
+      # reached without that flag set, a future change has bypassed the
+      # LFI gate; refuse to read rather than silently leak.
+      unless @options[:allow_file_uris]
+        raise "BUG: #{self.class}##{__method__} reached with " \
+              "allow_file_uris=false (LFI gate bypassed)"
+      end
+
       return nil unless circular_reference_check(uri.to_s)
 
       path = uri.path
@@ -718,6 +727,17 @@ module CssParser
     # the URI scheme on every redirect hop so a `Location: file://...`
     # cannot be followed even on this opt-in code path.
     def fetch_via_net_http(uri, redirect_count = 0) # :nodoc:
+      # Internal invariant: this method is the implementation of the
+      # `allow_local_network: true` branch of `read_remote_file`. If it
+      # is ever reached without that flag set, a future change has
+      # bypassed the SSRF gate; refuse to fetch rather than silently
+      # connect. The recursive call on a redirect inherits this guard
+      # because the option does not change mid-request.
+      unless @options[:allow_local_network]
+        raise "BUG: #{self.class}##{__method__} reached with " \
+              "allow_local_network=false (SSRF gate bypassed)"
+      end
+
       raise RemoteFileError, uri.to_s unless REMOTE_ALLOWED_SCHEMES.include?(uri.scheme)
       raise RemoteFileError, uri.to_s if redirect_count > MAX_REDIRECTS
 
