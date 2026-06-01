@@ -38,7 +38,7 @@ module CssParser
     REMOTE_ALLOWED_SCHEMES = %w[http https].freeze
 
     # Array of CSS files that have been loaded.
-    attr_reader   :loaded_uris
+    attr_reader :loaded_uris
 
     def initialize(options = {})
       @options = {
@@ -644,7 +644,7 @@ module CssParser
       # LFI gate; refuse to read rather than silently leak.
       unless @options[:allow_file_uris]
         raise "BUG: #{self.class}##{__method__} reached with " \
-              "allow_file_uris=false (LFI gate bypassed)"
+              'allow_file_uris=false (LFI gate bypassed)'
       end
 
       return nil unless circular_reference_check(uri.to_s)
@@ -735,7 +735,7 @@ module CssParser
       # because the option does not change mid-request.
       unless @options[:allow_local_network]
         raise "BUG: #{self.class}##{__method__} reached with " \
-              "allow_local_network=false (SSRF gate bypassed)"
+              'allow_local_network=false (SSRF gate bypassed)'
       end
 
       raise RemoteFileError, uri.to_s unless REMOTE_ALLOWED_SCHEMES.include?(uri.scheme)
