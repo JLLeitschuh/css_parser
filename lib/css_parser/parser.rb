@@ -17,6 +17,8 @@ module CssParser
   # [<tt>absolute_paths</tt>] Convert relative paths to absolute paths (<tt>href</tt>, <tt>src</tt> and <tt>url('')</tt>. Boolean, default is <tt>false</tt>.
   # [<tt>import</tt>] Follow <tt>@import</tt> rules. Boolean, default is <tt>true</tt>.
   # [<tt>io_exceptions</tt>] Throw an exception if a link can not be found. Boolean, default is <tt>true</tt>.
+  # [<tt>allow_local_network</tt>] Permit http(s) fetches against loopback / private / link-local / cloud-metadata addresses. Boolean, default is <tt>false</tt>. When <tt>false</tt> (the default), outbound HTTP requests are routed through <tt>ssrf_filter</tt>, which resolves the host and rejects unsafe IP ranges. Set to <tt>true</tt> only when the destination is known to be safe (e.g. local fixture servers in tests). Independent of <tt>allow_file_uris</tt>.
+  # [<tt>allow_file_uris</tt>] Permit <tt>file://</tt> URIs via <tt>load_uri!</tt>. Boolean, default is <tt>false</tt>. When <tt>false</tt> (the default), a caller that passes a <tt>file://</tt> URI to <tt>load_uri!</tt> — directly or via a CSS <tt>@import</tt> resolved against a <tt>file://</tt> base_uri — is refused, closing the local-file-disclosure vector when the URI is influenced by user input. <tt>load_file!</tt> is unaffected: it is the explicit local-file API and takes a caller-supplied path. Independent of <tt>allow_local_network</tt>.
   class Parser
     USER_AGENT = "Ruby CSS Parser/#{CssParser::VERSION} (https://github.com/premailer/css_parser)".freeze
     RULESET_TOKENIZER_RX = /\s+|\\{2,}|\\?[{}\s"]|[()]|.[^\s"{}()\\]*/.freeze
@@ -28,6 +30,13 @@ module CssParser
 
     MAX_REDIRECTS = 3
 
+    # Schemes accepted by `read_remote_file`. `file://` is intentionally
+    # NOT in this list — local files are handled directly by `load_uri!`
+    # and `load_file!`. Keeping `file://` out of the remote read path
+    # closes the cross-scheme redirect (HTTP 3xx → `file://`) vector that
+    # was GHSA-9pmc-p236-855h.
+    REMOTE_ALLOWED_SCHEMES = %w[http https].freeze
+
     # Array of CSS files that have been loaded.
     attr_reader   :loaded_uris
 
@@ -38,13 +47,13 @@ module CssParser
         io_exceptions: true,
         rule_set_exceptions: true,
         capture_offsets: false,
-        user_agent: USER_AGENT
+        user_agent: USER_AGENT,
+        allow_local_network: false,
+        allow_file_uris: false
       }.merge(options)
 
       # array of RuleSets
       @rules = []
-
-      @redirect_count = nil
 
       @loaded_uris = []
 
@@ -510,7 +519,28 @@ module CssParser
       # pass on the uri if we are capturing file offsets
       opts[:filename] = uri.to_s if opts[:capture_offsets]
 
-      src, = read_remote_file(uri) # skip charset
+      # file:// is handled here, not inside read_remote_file. The
+      # remote-read path must never service file:// URIs, so a 3xx
+      # `Location: file://...` redirect cannot be turned into a local
+      # File.read.
+      #
+      # file:// via `load_uri!` is also gated by `allow_file_uris`:
+      # an attacker who can influence a URI passed here (e.g. via a CSS
+      # @import resolved against an attacker-controlled base_uri) could
+      # otherwise turn it into arbitrary local file disclosure. Callers
+      # that legitimately need to load local files should use
+      # `load_file!` (the explicit local-file API).
+      src = if uri.scheme == 'file'
+              unless @options[:allow_file_uris]
+                raise RemoteFileError, uri.to_s if @options[:io_exceptions]
+
+                return
+              end
+              read_local_file(uri)
+            else
+              src_and_charset, = read_remote_file(uri) # skip charset
+              src_and_charset
+            end
 
       add_block!(src, opts) if src
     end
@@ -604,86 +634,124 @@ module CssParser
       utf8_block
     end
 
-    # Download a file into a string.
+    # Read a local file:// URI. Called only from `load_uri!` — never
+    # from the remote read path — so an HTTP redirect cannot reach this
+    # branch (GHSA-9pmc-p236-855h).
+    def read_local_file(uri) # :nodoc:
+      # Internal invariant: this method is the implementation of the
+      # `allow_file_uris: true` branch of `load_uri!`. If it is ever
+      # reached without that flag set, a future change has bypassed the
+      # LFI gate; refuse to read rather than silently leak.
+      unless @options[:allow_file_uris]
+        raise "BUG: #{self.class}##{__method__} reached with " \
+              "allow_file_uris=false (LFI gate bypassed)"
+      end
+
+      return nil unless circular_reference_check(uri.to_s)
+
+      path = uri.path
+      path.gsub!(%r{^/}, '') if Gem.win_platform?
+      File.read(path, mode: 'rb')
+    rescue
+      raise RemoteFileError, uri.to_s if @options[:io_exceptions]
+
+      nil
+    end
+
+    # Download a remote http(s) file into a string.
     #
     # Returns the file's data and character set in an array.
+    #
+    # In the default (secure) configuration, requests are issued via
+    # `SsrfFilter.get`, which:
+    #   - rejects any scheme other than http/https (defeats redirect-to-
+    #     `file://` / `gopher://` / `dict://` etc.);
+    #   - resolves the hostname with `Resolv` and rejects requests whose
+    #     resolved IP is loopback, RFC-1918, link-local, multicast, or any
+    #     other range typically used for internal services (defeats SSRF
+    #     via literal IPs and via CNAME / attacker-controlled A records);
+    #   - re-validates scheme and IP on every redirect hop.
+    #
+    # When `allow_local_network: true` is set on the Parser, the SSRF
+    # check is bypassed and plain `Net::HTTP` is used — but the scheme
+    # is still validated on every redirect hop, so cross-scheme
+    # redirect to `file://` (the original GHSA-9pmc-p236-855h sink)
+    # remains closed even on this opt-in path.
     #--
     # TODO: add option to fail silently or throw and exception on a 404
     #++
     def read_remote_file(uri) # :nodoc:
-      if @redirect_count.nil?
-        @redirect_count = 0
-      else
-        @redirect_count += 1
-      end
+      uri = Addressable::URI.parse(uri.to_s)
 
       unless circular_reference_check(uri.to_s)
-        @redirect_count = nil
         return nil, nil
       end
 
-      if @redirect_count > MAX_REDIRECTS
-        @redirect_count = nil
-        return nil, nil
-      end
-
-      src = '', charset = nil
-
-      begin
-        uri = Addressable::URI.parse(uri.to_s)
-
-        if uri.scheme == 'file'
-          # local file
-          path = uri.path
-          path.gsub!(%r{^/}, '') if Gem.win_platform?
-          src = File.read(path, mode: 'rb')
-        else
-          # remote file
-          if uri.scheme == 'https'
-            uri.port = 443 unless uri.port
-            http = Net::HTTP.new(uri.host, uri.port)
-            http.use_ssl = true
-          else
-            http = Net::HTTP.new(uri.host, uri.port)
-          end
-
-          res = http.get(uri.request_uri, {'User-Agent' => @options[:user_agent], 'Accept-Encoding' => 'gzip'})
-          src = res.body
-          charset = res.respond_to?(:charset) ? res.encoding : 'utf-8'
-
-          if res.code.to_i >= 400
-            @redirect_count = nil
-            raise RemoteFileError, uri.to_s if @options[:io_exceptions]
-
-            return '', nil
-          elsif res.code.to_i >= 300 and res.code.to_i < 400
-            unless res['Location'].nil?
-              return read_remote_file Addressable::URI.parse(Addressable::URI.escape(res['Location']))
-            end
-          end
-
-          case res['content-encoding']
-          when 'gzip'
-            io = Zlib::GzipReader.new(StringIO.new(res.body))
-            src = io.read
-          when 'deflate'
-            io = Zlib::Inflate.new
-            src = io.inflate(res.body)
-          end
-        end
-
-        if charset
-          src.encode!('UTF-8', charset)
-        end
-      rescue
-        @redirect_count = nil
+      unless REMOTE_ALLOWED_SCHEMES.include?(uri.scheme)
         raise RemoteFileError, uri.to_s if @options[:io_exceptions]
 
         return nil, nil
       end
 
-      @redirect_count = nil
-      [src, charset]
+      begin
+        res = if @options[:allow_local_network]
+                fetch_via_net_http(uri)
+              else
+                SsrfFilter.get(
+                  uri.to_s,
+                  scheme_whitelist: REMOTE_ALLOWED_SCHEMES,
+                  max_redirects: MAX_REDIRECTS,
+                  headers: {'User-Agent' => @options[:user_agent]}
+                )
+              end
+
+        if res.code.to_i >= 400
+          raise RemoteFileError, uri.to_s if @options[:io_exceptions]
+
+          return '', nil
+        end
+
+        charset = res.respond_to?(:charset) ? res.encoding : 'utf-8'
+        src = res.body
+        src.encode!('UTF-8', charset) if charset
+
+        [src, charset]
+      rescue
+        raise RemoteFileError, uri.to_s if @options[:io_exceptions]
+
+        [nil, nil]
+      end
+    end
+
+    # Net::HTTP path used only when `allow_local_network: true`. Validates
+    # the URI scheme on every redirect hop so a `Location: file://...`
+    # cannot be followed even on this opt-in code path.
+    def fetch_via_net_http(uri, redirect_count = 0) # :nodoc:
+      # Internal invariant: this method is the implementation of the
+      # `allow_local_network: true` branch of `read_remote_file`. If it
+      # is ever reached without that flag set, a future change has
+      # bypassed the SSRF gate; refuse to fetch rather than silently
+      # connect. The recursive call on a redirect inherits this guard
+      # because the option does not change mid-request.
+      unless @options[:allow_local_network]
+        raise "BUG: #{self.class}##{__method__} reached with " \
+              "allow_local_network=false (SSRF gate bypassed)"
+      end
+
+      raise RemoteFileError, uri.to_s unless REMOTE_ALLOWED_SCHEMES.include?(uri.scheme)
+      raise RemoteFileError, uri.to_s if redirect_count > MAX_REDIRECTS
+
+      http = Net::HTTP.new(uri.host, uri.port || uri.default_port)
+      http.use_ssl = (uri.scheme == 'https')
+
+      res = http.get(uri.request_uri, {'User-Agent' => @options[:user_agent]})
+
+      if res.code.to_i >= 300 && res.code.to_i < 400 && res['Location']
+        redirect_uri = Addressable::URI.parse(Addressable::URI.escape(res['Location']))
+        return fetch_via_net_http(redirect_uri, redirect_count + 1)
+      end
+
+      res
     end
 
   private
