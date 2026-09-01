@@ -23,6 +23,13 @@ parser.load_uri!('file://home/user/styles/style.css')
 # load a remote file, setting the base_uri and media_types
 parser.load_uri!('../style.css', {base_uri: 'http://example.com/styles/inc/', media_types: [:screen, :handheld]})
 
+# load a remote file, verifying it against a Subresource Integrity value
+# (https://www.w3.org/TR/SRI/) before parsing -- e.g. the value of an
+# HTML <link integrity="..."> attribute. Raises CssParser::RemoteFileError
+# (or, with io_exceptions: false, loads nothing) when the fetched body
+# doesn't match.
+parser.load_uri!('http://example.com/styles/style.css', integrity: 'sha384-oqVuAfXRKap7fdgcCY5uykM6+R9GqQ8K/uxy9rx7HNQlGYl1kPzQho1wx4JwY8wC')
+
 # load a local file, setting the base_dir and media_types
 parser.load_file!('print.css', '~/styles/', :print)
 
