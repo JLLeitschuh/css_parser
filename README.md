@@ -30,6 +30,19 @@ parser.load_uri!('../style.css', {base_uri: 'http://example.com/styles/inc/', me
 # doesn't match.
 parser.load_uri!('http://example.com/styles/style.css', integrity: 'sha384-oqVuAfXRKap7fdgcCY5uykM6+R9GqQ8K/uxy9rx7HNQlGYl1kPzQho1wx4JwY8wC')
 
+# `integrity:` also accepts several space-separated values, exactly like the
+# HTML attribute does. When more than one hash algorithm is present, only the
+# strongest one is checked (sha512 > sha384 > sha256) and every weaker value is
+# ignored; multiple values for that same strongest algorithm are treated as
+# alternatives -- matching any one of them is enough.
+parser.load_uri!(
+  'http://example.com/styles/style.css',
+  integrity: 'sha256-Br6tO8uuFyBAw2O0eUNdXVyuS/POLb5jpHxXaxIq6Q0= sha384-0gCPKBW0n+VzQzZu5gzP+YMxy9QTLyn1y/O/TMvLTpVajzRKAx6d7TiPB5W7DnDn'
+)
+# ^ only the sha384 value is actually checked here; the sha256 one is present
+# (e.g. for browsers/tools that only understand sha256) but ignored by this
+# library since a stronger algorithm is also listed.
+
 # load a local file, setting the base_dir and media_types
 parser.load_file!('print.css', '~/styles/', :print)
 
